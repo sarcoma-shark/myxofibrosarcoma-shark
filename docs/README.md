@@ -14,9 +14,9 @@ The list of relevant terms, and the sequential model for classification, are bei
 
 ## Getting Started
 
-One document has all the relevant terms, and the regular expression terms utilized to identify them from the pathology reports.
+One document (SHARK_MFS_data_dictionary.csv) has all the relevant terms, and the regular expression terms utilized to identify them from the pathology reports.
 
-One document has the code for the model.
+One document has the code for the model (myxofibrosarcomaSHARK.Rmd).
 
 Of note, no personal health information is anywhere in these files. The raw data is not publically available. However, the included documentation could be utilized to run and check the model on any group of pathology reports. 
 
