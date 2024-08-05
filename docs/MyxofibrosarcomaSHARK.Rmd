@@ -1,0 +1,546 @@
+---
+title: "MyxoAlgoMarkdown"
+author: "Gundle"
+date: '2024-07-23'
+output: github_document
+---
+
+# Sarcoma Histology Algorithm for Repository Knowledge (SHARK) - Myxofibrosarcoma algorithm 1.0
+
+## Load packages 
+```{r Libraries, warning=FALSE, message=FALSE}
+
+library(tidyr)
+library(lubridate)
+library(dplyr)
+library(ggplot2)
+library(readxl)
+library(FFTrees) # FFTrees made by Dr. Nathaniel Phillips et al
+
+```
+
+## Load
+
+```{r load}
+# Load data
+
+## See data dictionary for column types and names. Importantly, the RegEx expressions to pull from the raw pathology reports for emphasis, negation, and other key terms are all in the data dictionary but could be incorporated into a script that receives raw pathology reports and generates the data below. 
+
+## Loads from an Excel sheet, single sheet, in .xlsx format. Change to the name of your datasheet as needed. 
+
+myxofibrosarcoma_data <- read_excel("input_20240530.xlsx", 
+                       col_types = c("text", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "text")) 
+
+## This has 70 columns. The first column is the pathology ID number. The last column is the Gold Standard diagnosis. See data dictionary for column types and relevant regular expressions.  
+
+r <- as_tibble(myxofibrosarcoma_data)
+
+```
+
+## Data Cleaning
+
+In these steps, we prepare the data for model creation. It is common that final diagnoses may be in a variety of forms, and these must be checked to ensure all are categorized correctly at the beginning. 
+
+```{r cleaning}
+
+# Eliminate any rows not containing a Gold Standard diagnosis
+working <- r %>% filter(GoldStandard != "NULL") 
+
+
+# Make a Binary of the Gold Standard
+working$GoldStandardBinary <- 999
+working <- working %>% mutate( GoldStandardBinary = case_when(
+  
+  GoldStandard == "myxofibrosarcoma" ~ "1",
+  GoldStandard == "myxofibrosarcoma/ malignant fibrous histiocytoma" ~ "1",
+  GoldStandard == "metastatic pleomorphic myxofibrosarcoma" ~ "1",
+  GoldStandard == "metastatic myxofibrosarcoma" ~ "1",
+  GoldStandard == "pleomorphic myxofibrosarcoma" ~ "1",
+  GoldStandard == "recurrent myxofibrosarcoma" ~ "1"
+  
+    ,TRUE ~ "0"))
+
+## Above are the final diagnoses in the pathology reports that we are categorizing  as myxofibrosarcoma. Any other diagnosis is categorized as 'not myxofibrosarcoma' as a binary. In this column: (1 = myxofibrosarcoma) and (0 = not myxofibrosarcoma)
+
+## Recommendation: check at this step that all rows either have a 1 or 0 in the GoldStandardBinary column. Depending on the state of your datasheet, ensure that all variations and potential mispellings of myxofibrosarcoma have been accounted for in this area. 
+
+table(working$GoldStandardBinary)
+
+```
+
+## Model 1
+
+This is the first model, which aims to be balanced and to reduce the amount of reports were manual review is recommended. These are a series of Case statements. The ordering of the rows matter. 
+As an explanation, a 'Beetlejuice' is when a term is mentioned 3 times in a report. If you do not understand this reference, please stop what you are doing and watch the following: 
+https://www.imdb.com/title/tt0094721/
+
+```{r Model1}
+
+check <- working %>% mutate( finaldz = case_when(
+  
+  MFS == 0 ~ "Not MFS", #if somehow any pathology reports have no mention of mxyofibrosarcoma at this stage, they are eliminated as not being myxofibrosarcoma.
+  
+# When no Beetlejuice on MFS, but has a Beetlejuice on another of the non-ultra-rare STS, then they are not MFS
+  MFS < 3 & SFT > 2 ~  "SFT", # Solitary fibrous tumor
+  MFS < 3 & DDLS > 2 ~ "DDLS", # Dedifferentiated liposarcoma
+  MFS < 3 & SS > 2 ~ "SS", # Synovial Sarcoma
+  MFS < 3 & MLS > 2 ~ "MLS", # Myxoid liposarcoma
+  MFS < 3 & LMS > 2 ~ "LMS", # Leiomyosarcoma
+  MFS < 3 & AS > 2 ~ "AS", #A ngiosarcoma
+  MFS < 3 & UPS > 2 ~ "UPS", # Undifferentiated pleomorphic sarcoma
+  MFS < 3 & DFSP > 2 ~ "DFSP", # Dermatofibrosarcoma protuberans
+  MFS < 3 & PLS > 2 ~ "PLS", # Pleomorphic sarcoma
+
+## In our cohort, this resulted in zero misses 
+
+# If we have a Bettlejuice of more than one diagnosis, then it was likely a difficult case for the pathologist, and these need manual review.
+  MFS > 2 & (SFT > 2 | DDLS > 2 | SS > 2 | MLS > 2 | LMS > 2 | AS > 2 | UPS > 2 | DFSP > 2 | PLS > 2) ~ "Manual Review",
+
+# If bone anatomy is mentioned repeatedly, it can be a challenge to determine whether bone or soft tissue origin. Therefore manual review
+  Bones > 2 ~ "Manual Review",
+
+# If Beetlejuice on MFS, then myxofibrosarcoma
+  MFS > 2 ~ "Myxofibrosarcoma", 
+
+# If mention myxofibrosarcoma twice, and has essential elements of the WHO diagnosis, then it is myxofibrosarcoma
+  MFS == 2 & MFS_WHO_Essentials > 0 ~ "Myxofibrosarcoma", 
+
+# For those remaining, if WHO essential elements of a MFS diagnosis are mentioned more than once, classify as MFS  
+  MFS_WHO_Essentials > 1 ~ "Myxofibrosarcoma",
+
+# If carcinoma mentioned more than twice, classify as not myxofibrosarcoma
+  Carcinoma > 2 ~ "Not MFS",
+
+# If benign diagnoses are mentioned more than twice, classify as not myxofibrosarcoma  
+  Benign > 2 ~ "Not MFS",
+  
+# Of those we have left, if 2 MFS and 2 of any others, classify as not myxofibrosarcoma  
+  MFS == 2 & (SFT == 2 | DDLS == 2 | SS == 2 | MLS == 2 | LMS == 2 | AS == 2 | UPS == 2 | DFSP == 2 | PLS == 2) ~ "Not MFS",
+
+# Some of the below steps could be combined, but leave separate as it might be helpful for forks or assessing each step.
+
+## If two mentions of myxofibrosarcoma and high grade, classify as myxofibrosarcoma
+  MFS == 2 & Grade > 2 ~ "Myxofibrosarcoma", 
+
+## If two mentions of myxofibrosarcoma and intermediate grade, classify as myxofibrosarcoma
+  MFS == 2 & Grade == 2 ~ "Myxofibrosarcoma",
+
+## If two mentions of myxofibrosarcoma at all, classify as myxofibrosarcoma  
+  MFS == 2 ~ "Myxofibrosarcoma", #no errors induced on this step
+
+# If more than two mentions of fibromyxosarcoma,classify as not myxofibrosarcoma   
+Fibromyxosarcoma > 2 ~ "Not MFS",
+
+# If multiple genetic markers of sarcoma were mentioned, at this point trigger manual review
+  Markers > 2 ~ "Manual Review",
+
+# At this point, we eliminated those who Beetlejuice on malignant fibrous histiocytoma, an older diagnosis
+  MFH > 2 ~ "Not MFS",
+
+# Any mentions of well differentiated liposarcoma at this point were categorized as not being MFS
+  WDLS > 0 ~ "Not MFS",
+
+# Multiple mentions of lipoma categorized as not MFS
+  Lipoma > 2 ~ "Not MFS",
+  
+# At this point there were very few cases left, but looking to classify them all based on the available data, into either MFS, Not MFS, or mark for manual review
+  
+  Recurrent > 2 ~ "Myxofibrosarcoma", # Unfortunately, local recurrence is relatively common in MFS
+  
+  Epithelioid > 1 ~ "Not MFS",
+  
+  Myxoma > 1 ~ "Not MFS",
+  
+  Priors > 0 ~ "Myxofibrosarcoma", # Unfortunately, local recurrence is relatively common in MFS
+  
+  Recurrent > 0 ~ "Myxofibrosarcoma", # Unfortunately, local recurrence is relatively common in MFS
+
+# For those remaining, more than one mention of an alternative soft tissue sarcoma were categorized as not MFS  
+  SFT > 1 | DDLS > 1 | SS > 1 | MLS > 1 | AS > 1 | PLS > 1 ~ "Not MFS",
+
+# Regex suggesting diagnosis unknown or outside reports at this point were categorized as not being MFS. One reason for this was inadequate biopsy
+
+  (Unknowns + Outside) > 2 ~ "Not MFS",
+
+# At this point in the case statement, for the following three diagnoses, any mention of them were categorized as not being MFS
+
+  Rhabdomyosarcoma > 0 ~ "Not MFS",
+  
+  DDLS > 0 ~ "Not MFS",
+  
+  SS > 0 ~ "Not MFS",
+
+# Some of these steps may be able to be deleted or changed in their order. In our set there were few cases left at this point
+
+  MFH > 1 ~ "Myxofibrosarcoma",
+  
+  Emph_MFH > 1 ~ "Myxofibrosarcoma",
+  
+  NodularFascitis > 2 ~ "Not MFS",
+
+# The next three steps reflect terms emphasizing sarcoma, curvilinear vascularity (a marker of MFS), markers of sarcoma
+  Emph_Sarcoma > 1 ~ "Myxofibrosarcoma",
+  
+  Curvilinear > 0 ~ "Myxofibrosarcoma",
+  
+  Emph_UPS > 0 ~ "Not MFS",
+  
+  MultinodArch > 0 ~ "Myxofibrosarcoma",
+  
+  Emph_Sarcoma > 0 ~ "Myxofibrosarcoma",
+  
+  MetastaticMFS > 0 ~ "Myxofibrosarcoma",
+   
+  Amputation > 1 ~ "Myxofibrosarcoma",
+
+# At this point, mention of any of our benign list of diagnoses were categorized as not MFS  
+  Benign > 0 ~ "Not MFS",
+
+# If unknown-related terms mentioned, categorized for manual review  
+  Unknowns > 0 ~ "Manual Review", # 50% are MFS
+
+# If any with WHO essential terms remain, categorize for manual review  
+  MFS_WHO_Essentials > 0 ~ "Manual Review", # 50% are MFS
+
+# Those who have made it to this point and are mentioning carcinoma terms are not MFS  
+  Carcinoma > 0 ~ "Not MFS",
+
+# Mentioning bones is slightly complicated, as it can involve amputations or some bony removal. Flag for manual review  
+  Bones > 0 ~ "Manual Review",
+
+# Pleomorphic sarcoma as a term, without specifically saying Undifferentiated Pleomorphic Sarcoma, is nonspecific. If otherwise not categorized at this point, selected for manual review  
+  PleomorphicSarcoma > 0 ~ "Manual Review" 
+
+# At this point, all the remaining are being classified as myxofibrosarcoma (and in our cohort, all were! Remember that to be in this algorithm, the word 'myxofibrosarcoma' had to be in the pathology report at least once. The majority of cases from the start were myxofibrosarcoma. This algorithm is aiming to categorize from this list into three buckets: Yes, MFS ; No, not MFS ; requires manual review. )
+  
+  ,TRUE ~ "Myxofibrosarcoma"
+  
+)
+)
+
+reviewing <- check %>% filter(!is.na(finaldz))
+
+untriaged <- check %>% filter(is.na(finaldz)) #This is to ensure that all diagnoses were triaged into one of the three buckets. It should be zero. 
+
+reviewingErrors <- reviewing %>% filter(GoldStandardBinary == 1) %>% filter(finaldz == "Not MFS") %>% select(-Emph_SFT, -Emph_AS, -Emph_MFS, -Emph_DDLS, -Emph_SS, -Emph_DFSP, -Emph_Fibromyxosarcoma, -Emph_Epithelioid, -Emph_Neurofibroma, -Emph_NodularFascitis, -Emph_Carcinoma, -Emph_LMS, -Emph_MLS, -Emph_PLS, -Emph_UPS, -Emph_MyxoidFibrosarcoma, -Emph_MFH, -Emph_Lipoma, -Emph_WDLS, -Emph_Myxoma, -Emph_Rhabdomyosarcoma, -Emph_Sarcoma)
+#Creates table where the model classifies as "Not MFS" but gold standard review showed myxofibrosarcoma
+
+```
+
+
+## Model 2
+With a focus on removing false negatives. 
+
+```{r Model2}
+
+#Reducing false positives, even if increases manual review 
+
+check <- working %>% mutate( finaldz2 = case_when(
+  
+  MFS == 0 ~ "Not MFS",
+  
+  MFS < 3 & SFT > 2 ~  "SFT", #added 1
+  MFS < 3 & DDLS > 2 ~ "DDLS", #added 2
+  MFS < 3 & SS > 2 ~ "SS", #added none
+  MFS < 3 & MLS > 2 ~ "MLS", #added 3
+  MFS < 3 & LMS > 2 ~ "LMS", #added 8
+  MFS < 3 & AS > 2 ~ "AS", #added 0
+  MFS < 3 & UPS > 2 ~ "UPS", #added 3
+  MFS < 3 & DFSP > 2 ~ "DFSP", #added 3
+  MFS < 3 & PLS > 2 ~ "PLS",
+  ##Summary - this worked 100% of the time, no misses
+  
+  MFS > 2 & (SFT > 2 | DDLS > 2 | SS > 2 | MLS > 2 | LMS > 2 | AS > 2 | UPS > 2 | DFSP > 2 | PLS > 2) ~ "Manual Review",
+
+  Bones > 2 ~ "Manual Review",
+  
+  MFS > 2 ~ "Myxofibrosarcoma", 
+  
+  MFS == 2 & MFS_WHO_Essentials > 0 ~ "Myxofibrosarcoma", 
+  
+  MFS_WHO_Essentials > 1 ~ "Myxofibrosarcoma",
+
+  Carcinoma > 2 ~ "Not MFS", #no false negatives
+  
+  MFS == 2 & (SFT == 2 | DDLS == 2 | SS == 2 | MLS == 2 | LMS == 2 | AS == 2 | UPS == 2 | DFSP == 2 | PLS == 2) ~ "Not MFS",
+  
+  
+  Unknowns > 2 ~ "Manual Review", #moved higher to decrease FP, but increases amount of manual review
+
+  MFS == 2 & Grade > 2 ~ "Myxofibrosarcoma", #gets us down to 201 untriaged, small number of error
+  
+  MFS == 2 & Grade == 2 ~ "Myxofibrosarcoma", #down to 182 untriaged, small number of errors
+  
+  MFS == 2 ~ "Myxofibrosarcoma", #no errors induced on this step
+  
+  Fibromyxosarcoma > 2 ~ "Not MFS",   #no false negatives
+  
+  Markers > 2 ~ "Manual Review",
+  
+  MFH > 2 ~ "Not MFS",   #no false negatives
+  
+  WDLS > 0 ~ "Not MFS",   #no false negatives
+  
+  Lipoma > 2 ~ "Not MFS",   #no false negatives
+  
+  #At this point, less than 20% of cases remained to be sorted
+  
+  Recurrent > 2 ~ "Myxofibrosarcoma",
+  
+  Epithelioid > 1 ~ "Not MFS",
+  
+  Priors > 0 ~ "Myxofibrosarcoma",
+  
+  Recurrent > 0 ~ "Myxofibrosarcoma",
+  
+  Myxoma > 1 ~ "Not MFS", #moved lower on 9/18/23 4:16pm while checking errors
+  
+  SFT > 1 | DDLS > 1 | SS > 1 | MLS > 1 | AS > 1 | PLS > 1 ~ "Not MFS",
+  
+  (Unknowns + Outside) > 2 ~ "Manual Review", 
+  
+  Rhabdomyosarcoma > 0 ~ "Not MFS",
+  
+  DDLS > 0 ~ "Not MFS",
+  
+  SS > 0 ~ "Not MFS",
+  
+  MFH > 1 ~ "Myxofibrosarcoma", 
+  
+  Emph_MFH > 1 ~ "Myxofibrosarcoma",
+  
+  NodularFascitis > 2 ~ "Not MFS",
+  
+  Emph_Sarcoma > 1 ~ "Myxofibrosarcoma",
+  
+  Curvilinear > 0 ~ "Myxofibrosarcoma",
+  
+  Emph_UPS > 0 ~ "Not MFS",
+  
+  MultinodArch > 0 ~ "Myxofibrosarcoma",
+  
+  Emph_Sarcoma > 0 ~ "Myxofibrosarcoma",
+  
+  MetastaticMFS > 0 ~ "Myxofibrosarcoma",
+   
+  Amputation > 1 ~ "Myxofibrosarcoma",
+  
+  Unknowns > 0 ~ "Manual Review", # 50% are MFS
+  
+  MFS_WHO_Essentials > 0 ~ "Manual Review", # 50% are MFS
+  
+    Benign > 2 ~ "Not MFS", 
+  
+  Carcinoma > 0 ~ "Not MFS",
+  
+  Bones > 0 ~ "Manual Review",
+  
+  PleomorphicSarcoma > 0 ~ "Manual Review" # 1 of 4 aren't MFS... and EVERYTHING ELSE is MFS!!! (40)
+  
+  ,TRUE ~ "Myxofibrosarcoma"
+  
+)
+)
+
+
+reviewing2 <- check %>% filter(!is.na(finaldz2)) #is zero
+
+reviewingErrors2 <- reviewing2 %>% filter(GoldStandardBinary == 1) %>% filter(finaldz2 == "Not MFS") 
+
+reviewingErrors2Less <- reviewingErrors3 %>% select(-Emph_SFT, -Emph_AS, -Emph_MFS, -Emph_DDLS, -Emph_SS, -Emph_DFSP, -Emph_Fibromyxosarcoma, -Emph_Epithelioid, -Emph_Neurofibroma, -Emph_NodularFascitis, -Emph_Carcinoma, -Emph_LMS, -Emph_MLS, -Emph_PLS, -Emph_UPS, -Emph_MyxoidFibrosarcoma, -Emph_MFH, -Emph_Lipoma, -Emph_WDLS, -Emph_Myxoma, -Emph_Rhabdomyosarcoma, -Emph_Sarcoma)
+
+Model2reviewFP <- reviewing2 %>% filter(GoldStandardBinary == 0) %>% filter(finaldz2 == "Myxofibrosarcoma") 
+Model2reviewFPLess <- Model2reviewFP %>% select(-Emph_SFT, -Emph_AS, -Emph_MFS, -Emph_DDLS, -Emph_SS, -Emph_DFSP, -Emph_Fibromyxosarcoma, -Emph_Epithelioid, -Emph_Neurofibroma, -Emph_NodularFascitis, -Emph_Carcinoma, -Emph_LMS, -Emph_MLS, -Emph_PLS, -Emph_UPS, -Emph_MyxoidFibrosarcoma, -Emph_MFH, -Emph_Lipoma, -Emph_WDLS, -Emph_Myxoma, -Emph_Rhabdomyosarcoma, -Emph_Sarcoma)
+
+
+
+table(reviewing2$GoldStandardBinary, reviewing2$finaldz2)
+
+```
+
+
+## Model 3
+This model was constructed to have 100% accuracy, at the cost of more manual review of charts.
+
+```{r model3}
+
+check <- working %>% mutate( finaldz3 = case_when(
+  
+  #1. When no myxofibrosarcoma in the actual pathology report (these really shouldn't be here, but is a double-check)
+  MFS == 0 ~ "Not MFS", #0
+  
+  #2. When no Beetlejuice on MFS, but has a Beetlejuice on another of the non-ultra-rare STS --> not MFS
+  
+  MFS < 3 & SFT > 2 ~  "SFT", 
+  MFS < 3 & DDLS > 2 ~ "DDLS",
+  MFS < 3 & SS > 2 ~ "SS", 
+  MFS < 3 & MLS > 2 ~ "MLS", 
+  MFS < 3 & LMS > 2 ~ "LMS", 
+  MFS < 3 & AS > 2 ~ "AS", 
+  MFS < 3 & UPS > 2 ~ "UPS", 
+  MFS < 3 & DFSP > 2 ~ "DFSP", 
+  MFS < 3 & PLS > 2 ~ "PLS",
+  ## Summary - this worked 100% of the time, no misses. 
+  ## ~10% sorted
+  
+  #3. If Beetlejuice on MFS as well as another non-ultrarare STS, then Manual Review
+    MFS > 2 & (SFT > 2 | DDLS > 2 | SS > 2 | MLS > 2 | LMS > 2 | AS > 2 | UPS > 2 | DFSP > 2 | PLS > 2) ~ "Manual Review",
+  ## Sorts ~2% of cases, of which 40% are ultimately myxofibrosarcoma
+  
+  #4. If now only Beetlejuice on MFS, then that is what is is
+  MFS > 2 ~ "Myxofibrosarcoma", 
+
+#5. If Beetlejuice on carcinoma, it isn't MFS
+  Carcinoma > 2 ~ "Not MFS", 
+
+#6. Same logice but an different diagnosis
+  Fibromyxosarcoma > 2 ~ "Not MFS",   
+
+#7. Of remaining, if it mentions MFS alongside another diagnosis of sarcoma each twice, then it isn't MFS
+  MFS == 2 & (SFT == 2 | DDLS == 2 | SS == 2 | MLS == 2 | LMS == 2 | AS == 2 | UPS == 2 | DFSP == 2 | PLS == 2) ~ "Not MFS",
+  
+#8. Of remaining, If a lot of words suggesting unknown, then it needs manual review
+  Unknowns > 2 ~ "Manual Review", 
+
+#9. Of remaining, If a bunch of ICH/genetic markers, needs manual review at this point
+  Markers > 2 ~ "Manual Review", 
+
+#10. Of remaining, if MFS mentioned 2x and has WHO Essential features, then is MFS
+  MFS == 2 & MFS_WHO_Essentials > 0 ~ "Myxofibrosarcoma", 
+
+#11. Of remaining, MFS mentioned 2x and high grade, then MFS
+  MFS == 2 & Grade > 2 ~ "Myxofibrosarcoma",
+
+#12. The two steps above really aren't necessary. At this point if MFS mentioned twice, all were MFS
+  MFS == 2 ~ "Myxofibrosarcoma", 
+
+#13. Perhaps historical, but if MFH mentioned Bettlejuice then isn't MFS
+  MFH > 2 ~ "Not MFS",   
+
+#14. Beetlejuice of lipoma means no MFS
+  Lipoma > 2 ~ "Not MFS",   
+
+#15. Of the remaining, mentions of WDLS were not MFS
+  WDLS > 0 ~ "Not MFS",   
+
+#16. Same logic but with Rhabdo
+  Rhabdomyosarcoma > 1 ~ "Not MFS",
+
+
+#16. Same logic but with Epithelioid, or any of the non-ultra-rare STS
+  Epithelioid > 1 ~ "Not MFS", 
+
+  SFT > 1 | DDLS > 1 | SS > 1 | MLS > 1 | AS > 1 | PLS > 1 ~ "Not MFS", 
+
+  DDLS > 0 ~ "Not MFS",
+
+    SS > 0 ~ "Not MFS",
+
+#17. Of remaining, mentioning benign words a bunch means not MFS
+    Benign > 2 ~ "Not MFS", 
+
+#18. Of remaining, evidence of it being recurrent disease means MFS
+  Recurrent > 2 ~ "Myxofibrosarcoma", 
+
+#19. Of remaining, lots of nodular fascitis mentions means no MFS
+  NodularFascitis > 2 ~ "Not MFS", 
+
+#20. Of remaining, multiple myxoma mentions means not MFS
+  Myxoma > 1 ~ "Not MFS", 
+
+#21. Similar to above, unknowns and outside review words are tricky and need manual review
+  (Unknowns + Outside) > 2 ~ "Manual Review", 
+
+#22. If mentions metastatic myxofibrosarcoma, then that's what it is
+  MetastaticMFS > 0 ~ "Myxofibrosarcoma", 
+
+#23. Of the remaining, referencing prior samples/operations/biopsies meant MFS
+  Priors > 0 ~ "Myxofibrosarcoma", 
+
+#24. Of remaining, need to take those with unknown and make manual review
+  Unknowns > 1 ~ "Manual Review", 
+
+  MFH > 1 ~ "Myxofibrosarcoma", 
+
+#Micro, but if has curvilinear vasculature but no mentions of myxoma, then MFS
+  Curvilinear > 0 & Myxoma == 0 ~ "Myxofibrosarcoma", 
+
+  Emph_Sarcoma > 0 ~ "Myxofibrosarcoma", 
+
+#At this point, if talking about a pleomorphic sarcoma generally, then needed manual review
+  PleomorphicSarcoma > 0 ~ "Manual Review", 
+  # about half flagged for manual review in this step were myxofibrosarcoma
+
+  Recurrent > 0 ~ "Myxofibrosarcoma", 
+
+  Amputation > 0 ~ "Myxofibrosarcoma", 
+
+  Bones > 2 ~ "Myxofibrosarcoma",
+
+  LMS > 0 ~ "Not MFS",
+
+  Carcinoma > 0 ~ "Not MFS", 
+
+  Neurofibroma > 1 ~ "Not MFS", 
+
+  Unknowns > 0 ~ "Manual Review", # About 50% of those flagged for manual review at this step were myxofibrosarcoma
+
+  MyxoidFibrosarcoma > 0 ~ "Not MFS", 
+
+  MLS > 0 ~ "Manual Review", 
+
+  Myxoma > 0 ~ "Manual Review" 
+
+  ,TRUE ~ "Myxofibrosarcoma"
+
+))
+
+
+table(check$finaldz3, check$GoldStandardBinary)
+sum(grepl('*', check$finaldz3)) 
+
+check %>% filter(finaldz3 == "Myxofibrosarcoma") %>% filter(GoldStandardBinary == "0")
+check %>% filter(finaldz3 == "Not MFS") %>% filter(GoldStandardBinary == "1")
+
+notMFS <- check %>% filter(GoldStandardBinary == 0) %>% filter(is.na(finaldz3))
+
+
+#Model that allows for more manual review, to get increased accuracy. For our data, ~20% are flagged for manual review
+
+```
+
+Alternative Models:
+1. Fast and Frugal Decision Trees
+2. Random Forest Model
+
+```{r AlternativeModels}
+
+forTrees <- working %>% select(-ID, -GoldStandard, -Emph_Epithelioid, -Emph_Rhabdomyosarcoma, -Emph_Neurofibroma, -Emph_NodularFascitis, -Emph_Lipoma, -Emph_PLS, -Emph_DFSP, -Emph_AS, -Emph_SS, -Emph_SFT, -InfiltraMarg, -Emph_MyxoidFibrosarcoma, -Emph_Fibromyxosarcoma, -Emph_SFT, -Emph_DDLS, -Emph_Carcinoma, -Emph_WDLS, -Emph_MFH, -Emph_MLS)
+
+forTrees$GoldStandardBinary <- as.factor(forTrees$GoldStandardBinary)
+
+FFD.fft <- FFTrees(formula = GoldStandardBinary ~. ,
+                   data = forTrees)
+
+FFD.fft
+
+plot(FFD.fft)
+
+
+library(randomForest)
+
+
+rf_myxo <- randomForest(formula = GoldStandardBinary ~. ,
+                   data = forTrees)
+
+print(rf_myxo)
+round(importance(rf_myxo))
+varImpPlot(rf_myxo)
+
+library(rpart)
+
+model.rpart <- rpart(GoldStandardBinary~., forTrees)
+
+model.rpart
+
+```
